@@ -1,11 +1,15 @@
 # Package Theft Detection System - Walkthrough
 
 ## How to Run
-1.  **Activate Environment:**
-    `source ~/Python_Common/common_venv/bin/activate`
-2.  **Set API Key:**
+1.  **(Optional) Create Virtual Environment:**
+    `python -m venv myenv`
+2.  **(Optional) Activate Virtual Environment:**
+    `source ./myvenv/bin/activate`
+3.  **Install required files:**
+    `pip install -r requirements.txt`
+4.  **Set API Key:**
     Ensure `TheftDetection/.env` contains your `OPENAI_API_KEY`.
-3.  **Run:**
+5.  **Run:**
     `python main.py`
 
 ## User Guide
