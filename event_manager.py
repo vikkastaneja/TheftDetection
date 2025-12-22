@@ -20,12 +20,17 @@ def calculate_iou(box1, box2):
     if x_right < x_left or y_bottom < y_top:
         return 0.0
 
-    intersection_area = (x_right - x_left) * (y_bottom - y_top)
-    box1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
-    box2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
+    intersection_area = max(0, x_right - x_left) * max(0, y_bottom - y_top)
+    box1_area = max(0, x2_1 - x1_1) * max(0, y2_1 - y1_1)
+    box2_area = max(0, x2_2 - x1_2) * max(0, y2_2 - y1_2)
 
-    iou = intersection_area / float(box1_area + box2_area - intersection_area)
+    union_area = float(box1_area + box2_area - intersection_area)
+    if union_area <= 0:
+        return 0.0
+
+    iou = intersection_area / union_area
     return iou
+
 
 class EventManager:
     def __init__(self, face_manager=None, buffer_size=30):
@@ -50,7 +55,7 @@ class EventManager:
     def update(self, results, frame):
         """
         Process detection results to update state.
-        results: List of YOLO results
+        results: A single YOLO result object OR a list of results (for ensemble)
         frame: The current video frame (numpy array)
         """
         current_time = time.time()
@@ -62,18 +67,40 @@ class EventManager:
         current_persons = []
         detected_packages = [] # List of {'box': box}
 
-        result = results[0]
-        boxes = result.boxes
-        
-        for box in boxes:
-            cls = int(box.cls[0])
-            # box coordinates
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            
-            if cls == self.person_class:
-                current_persons.append([x1, y1, x2, y2])
-            elif cls in self.package_classes:
-                detected_packages.append({'box': [x1, y1, x2, y2]})
+        # Normalize results to a list
+        if not isinstance(results, list):
+            results_list = [results]
+        else:
+            results_list = results
+
+        for res in results_list:
+            boxes = res.boxes
+            for box in boxes:
+                cls = int(box.cls[0])
+                # box coordinates
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                
+                if cls == self.person_class:
+                    # Deduplicate: Only add if not broad overlap with existing person
+                    # (Simple check: centers or high IoU)
+                    is_duplicate = False
+                    for existing_p in current_persons:
+                        if calculate_iou([x1, y1, x2, y2], existing_p) > 0.7:
+                            is_duplicate = True
+                            break
+                    if not is_duplicate:
+                        current_persons.append([x1, y1, x2, y2])
+
+                elif cls in self.package_classes:
+                    # Same deduplication for packages
+                    is_duplicate = False
+                    for existing_pkg in detected_packages:
+                        if calculate_iou([x1, y1, x2, y2], existing_pkg['box']) > 0.7:
+                            is_duplicate = True
+                            break
+                    if not is_duplicate:
+                        detected_packages.append({'box': [x1, y1, x2, y2]})
+
 
         # 2. Match Detected Packages to Tracked Packages (Greedy Match)
         matched_track_ids = set()

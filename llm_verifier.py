@@ -15,7 +15,7 @@ class LlmVerifier:
             return
 
         self.client = OpenAI(api_key=self.api_key)
-        self.model = "gpt-4o" 
+        self.model = "gpt-4o-mini" 
         print(f"LlmVerifier initialized with OpenAI {self.model}.")
 
     def _encode_image(self, frame):

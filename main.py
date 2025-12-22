@@ -1,188 +1,220 @@
 import cv2
 import sys
+import os
+import argparse
+import shutil
+import threading
+import time
 
 from detector import Detector
 from event_manager import EventManager
 from llm_verifier import LlmVerifier
 from face_manager import FaceManager
 from notification_manager import NotificationManager
-import threading
-import cv2
-import sys
-import os
+from dotenv import load_dotenv
+import queue
 
-import argparse
-import shutil
+load_dotenv()
+
+class StreamWorker:
+    """
+    Parallel Worker: Handles one camera stream, performs detection, 
+    and processes event logic in its own thread.
+    """
+    def __init__(self, url, name, detector, face_manager, notifier):
+        self.url = url
+        self.name = name
+        self.detector = detector
+        self.face_manager = face_manager
+        self.notifier = notifier
+        self.event_manager = EventManager(face_manager=face_manager)
+        
+        self.running = True
+        self.cap = cv2.VideoCapture(url)
+        self.latest_frame = None
+        self.annotated_frame = None
+        self.status_text = "Checking..."
+        self.lock = threading.Lock()
+        self.error_count = 0
+        
+        # Start Heartbeat
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+        self.log("Worker initialized and thread started.")
+
+    def log(self, msg):
+        print(f"[{self.name}] {msg}")
+
+    def _run(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            
+            if not ret:
+                self.error_count += 1
+                if self.error_count % 100 == 0:
+                    self.log("Stream lost. Attempting auto-reconnect...")
+                    self.cap.release()
+                    self.cap = cv2.VideoCapture(self.url)
+                time.sleep(0.1)
+                continue
+
+            self.error_count = 0
+            
+            # --- PARALLEL BRAIN START ---
+            try:
+                # 1. Detect
+                results = self.detector.detect(frame)
+                
+                # 2. Process logic
+                status, pkgs, theft_event = self.event_manager.update(results, frame)
+                
+                # 3. Handle Alert (Async)
+                if theft_event:
+                    self.log(f"!!! {theft_event['msg']} !!!")
+                    self.notifier.send_alert("POTENTIAL THEFT", f"[{self.name}] {theft_event['msg']}")
+                    # Logic for LLM check could be added here or in main
+                
+                # 4. Prepare visualization frame
+                res_list = results if isinstance(results, list) else [results]
+                ann_frame = res_list[0].plot()
+                cv2.putText(ann_frame, f"{self.name}: {status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                
+                # Update shared state
+                with self.lock:
+                    self.latest_frame = frame.copy()
+                    self.annotated_frame = ann_frame
+                    self.status_text = status
+
+            except Exception as e:
+                self.log(f"Processing Error: {e}")
+                time.sleep(1)
+
+    def get_display_frame(self):
+        with self.lock:
+            if self.annotated_frame is None:
+                return None
+            return self.annotated_frame.copy()
+
+    def stop(self):
+        self.running = False
+        self.cap.release()
+        self.log("Worker stopped.")
 
 def perform_cleanup():
     print("\n[RESET] Performing Factory Reset...")
-    
-    # 1. Clean Faces (Learned Data)
-    if os.path.exists("faces"):
-        shutil.rmtree("faces")
-        os.makedirs("faces")
-        print(" - Deleted all learned faces")
-    
-    # 2. Clean Logs
-    if os.path.exists("alerts.log"):
-        os.remove("alerts.log")
-        print(" - Deleted alerts.log")
+    for folder in ["faces"]:
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+            os.makedirs(folder)
+    for f in ["alerts.log", "evidence.jpg"]:
+        if os.path.exists(f): os.remove(f)
+    for model in ["yolov8n.pt", "rtdetr-l.pt"]:
+        if os.path.exists(model): os.remove(model)
+    print("[RESET] Complete.\n")
 
-    # 3. Clean Evidence
-    if os.path.exists("evidence.jpg"):
-        os.remove("evidence.jpg")
-        print(" - Deleted evidence.jpg")
-
-    # 4. Remove Model (Force Re-download)
-    if os.path.exists("yolov8n.pt"):
-        os.remove("yolov8n.pt")
-        print(" - Deleted yolov8n.pt (System will re-download the latest official model)")
-
-    print("[RESET] Complete. System is now fresh.\n")
+import time
 
 def main():
-    # Parse arguments
-    parser = argparse.ArgumentParser(description="Package Theft Detection System")
-    parser.add_argument("--headless", action="store_true", help="Run in headless mode (no GUI/Window)")
-    parser.add_argument("--reset", action="store_true", help="Factory reset: Delete all learned faces, logs, and models before starting")
+    parser = argparse.ArgumentParser(description="Multi-Camera Package Theft Detection")
+    parser.add_argument("--streams", nargs="+", help="RTSP URLs for cameras")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+    parser.add_argument("--active-minutes", type=float, help="Cycle Mode: Minutes ON")
+    parser.add_argument("--sleep-minutes", type=float, help="Cycle Mode: Minutes OFF")
+    parser.add_argument("--reset", action="store_true", help="Factory Reset")
+    parser.add_argument("--no-llm", action="store_true", help="Disable OpenAI")
+    parser.add_argument("--detector", choices=['yolo', 'rtdetr', 'ensemble'], default='ensemble')
     args = parser.parse_args()
 
-    if args.reset:
-        perform_cleanup()
+    if args.reset: perform_cleanup()
 
-    # Initialize Notifier first to report startup errors
     notifier = NotificationManager()
-
-    # Initialize video capture with IP Camera
-    rtsp_url = "rtsp://admin:Test1234%21@192.168.86.42:554/11"
-    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-    if not cap.isOpened():
-        msg = f"Error: Could not open video capture from {rtsp_url}"
-        print(msg)
-        notifier.send_alert("SYSTEM ERROR", msg)
-        sys.exit(1)
-
-    # Initialize components
-    detector = Detector()
+    detector = Detector(model_type=args.detector)
     face_manager = FaceManager()
-    event_manager = EventManager(face_manager=face_manager)
-    llm_verifier = LlmVerifier() # Will look for OPENAI_API_KEY env var
-    # notifier already initialized above
+    llm_verifier = LlmVerifier() if not args.no_llm else None
 
-    print("Starting video feed with detection.")
-    if args.headless:
-        print("Running in HEADLESS mode. Press Ctrl+C to quit.")
+    # Priority: 1. Command Line args, 2. Env variable, 3. Defaults
+    if args.streams:
+        urls = args.streams
     else:
-        print("Controls:")
-        print("  'q' - Quit")
-        print("  'r' - Register current face as Owner")
-    
-    llm_status = "LLM Status: Idle"
+        env_streams = os.getenv("CAMERA_STREAMS")
+        if env_streams:
+            urls = [s.strip() for s in env_streams.split(",") if s.strip()]
+        else:
+            # Fallback default
+            urls = ["rtsp://192.168.86.35:57800/44b620aab5dfcd3d"]
 
-    def run_llm_check(frames, event_msg):
-        nonlocal llm_status
-        llm_status = "LLM Status: Analyzing..."
+    def run_detection_session(duration_minutes=None):
+        inf_mode = "Infinite" if duration_minutes is None else f"{duration_minutes} min"
+        print(f"\n--- Parallel Detection Active ({len(urls)} cameras, {inf_mode}) ---")
         
-        # 1. Ask LLM
-        result = llm_verifier.verify_event(frames)
-        llm_status = f"LLM Result: {result}"
+        # Initialize Workers (Threads)
+        workers = [StreamWorker(url, f"CAM_{i+1}", detector, face_manager, notifier) for i, url in enumerate(urls)]
         
-        # 2. Notify
-        print(f"\n[AI REPORT] {result}\n")
-        
-        # Heuristic check on LLM response to see if confirmed
-        is_confirmed = "YES" in result.upper()
-        alert_type = "THEFT CONFIRMED" if is_confirmed else "Suspicious Event"
-        
-        notifier.send_alert(alert_type, f"AI Verdict: {result}", proof_path="See logs")
+        start_time = time.time()
 
-    try:
-        while True:
-            # Capture frame-by-frame
-            ret, frame = cap.read()
-
-            if not ret:
-                msg = "Error: Can't receive frame (stream end?). Camera might be down."
-                print(msg)
-                notifier.send_alert("CAMERA DOWN", msg)
-                break
-
-            # Run object detection
-            results = detector.detect(frame)
-            
-            # Update event logic
-            status_text, tracked_packages, theft_event = event_manager.update(results, frame)
-            
-            # Check for Theft Event -> Trigger LLM
-            if theft_event:
-                msg = theft_event['msg']
-                print(f"THEFT DETECTED: {msg}")
-                
-                # Save Evidence Frame
-                evidence_path = None
-                if theft_event['frames']:
-                    evidence_path = os.path.abspath("evidence.jpg")
-                    
-                    # SMART EVENT: Find the frame with the best face
-                    best_frame = face_manager.find_best_face_frame(theft_event['frames'])
-                    
-                    cv2.imwrite(evidence_path, best_frame)
-                
-                # Initial Alert
-                notifier.send_alert("POTENTIAL THEFT", msg, proof_path=evidence_path)
-                
-                # Run LLM in a separate thread
-                # We pass the evidence path to the thread so it can reuse it if needed
-                threading.Thread(target=run_llm_check, args=(theft_event['frames'], msg)).start()
-            
-            # HEADLESS CHECK
-            if not args.headless:
-                # Visualize the results on the frame
-                annotated_frame = results[0].plot()
-
-                # Draw status text
-                cv2.putText(annotated_frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                cv2.putText(annotated_frame, llm_status, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-
-                # Visualize Face ID (Optional: Draw name near person)
-                # We can extract person boxes from YOLO results to optimize
-                for box in results[0].boxes:
-                    if int(box.cls[0]) == 0: # Person
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        name, dist = face_manager.identify_person(frame, [x1, y1, x2, y2])
-                        label = f"{name} ({dist:.2f})"
-                        cv2.putText(annotated_frame, label, (int(x1), int(y1)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                
-                # Draw tracked packages 
-                for pkg_id, pkg in tracked_packages.items():
-                    box = pkg['box']
-                    cx = int((box[0] + box[2]) / 2)
-                    cy = int((box[1] + box[3]) / 2)
-                    cv2.putText(annotated_frame, f"ID: {pkg_id}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
-
-                # Display the resulting frame
-                cv2.imshow('Theft Detection Feed', annotated_frame)
-                
-                key = cv2.waitKey(1)
-                if key == ord('q'):
+        try:
+            while True:
+                if duration_minutes and (time.time() - start_time)/60 >= duration_minutes:
+                    print("Session time limit reached.")
                     break
-                elif key == ord('r'):
-                    # Register the largest face in the frame as "Owner"
-                    # In a real app, you'd ask for a name. Here we default to "Owner"
-                    print("Attempting to register face...")
-                    success, msg = face_manager.register_face(frame, "Owner")
-                    print(msg)
-                    # Re-load to update memory
-                    if success:
-                        face_manager.load_known_faces()
-    except KeyboardInterrupt:
-        print("\nStopping...")
 
-    # When everything done, release the capture
-    cap.release()
-    cv2.destroyAllWindows()
+                # The Main Thread now only handles the UI display and keyboard input
+                # All detection and processing is happening in background threads!
+                
+                if not args.headless:
+                    frames = []
+                    for w in workers:
+                        f = w.get_display_frame()
+                        if f is not None:
+                            frames.append(f)
+                    
+                    if frames:
+                        # Stack images horizontally for the grid
+                        display_grid = cv2.hconcat(frames) if len(frames) > 1 else frames[0]
+                        
+                        # Scale down for desktop if too large
+                        h, w = display_grid.shape[:2]
+                        target_w = 1280
+                        if w > target_w:
+                            scale = target_w / w
+                            display_grid = cv2.resize(display_grid, (int(w*scale), int(h*scale)))
+
+                        cv2.imshow('ANTIGRAVITY: Multi-Cam Parallel Guard', display_grid)
+                    
+                    key = cv2.waitKey(1)
+                    if key == ord('q'):
+                        return True, False
+                    elif key == ord('r'):
+                        # Register owner using the first available camera frame
+                        for w in workers:
+                            with w.lock:
+                                if w.latest_frame is not None:
+                                    success, msg = face_manager.register_face(w.latest_frame, "Owner")
+                                    print(f"[{w.name}] API: {msg}")
+                                    if success: face_manager.load_known_faces()
+                                    break
+                else:
+                    # Headless: Just wait and let threads work
+                    time.sleep(1)
+
+        except KeyboardInterrupt:
+            print("\nShutting down workers...")
+            return True, False
+        finally:
+            for w in workers: w.stop()
+            cv2.destroyAllWindows()
+            
+        return False, False
+
+    # Runtime Execution
+    if args.active_minutes and args.sleep_minutes:
+        while True:
+            should_quit, err = run_detection_session(args.active_minutes)
+            if should_quit: break
+            time.sleep(args.sleep_minutes * 60)
+    else:
+        run_detection_session(None)
 
 if __name__ == "__main__":
     main()
+

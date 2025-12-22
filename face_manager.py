@@ -99,6 +99,9 @@ class FaceManager:
             person_crop = rgb_frame[max(0, y1):min(frame_h, y2), max(0, x1):min(frame_w, x2)]
             if person_crop.size == 0: continue
             
+            # Dlib requires contiguous arrays for C++ bindings
+            person_crop = np.ascontiguousarray(person_crop)
+            
             face_locs = face_recognition.face_locations(person_crop)
             if not face_locs: continue
             
@@ -148,9 +151,12 @@ class FaceManager:
             width_ratio = face_width / frame_w
             
             # Thresholds
-            PROXIMITY_THRESHOLD = 0.10 # Face must be 10% of screen width (Close)
-            PERSISTENCE_THRESHOLD = 50 # 50 Frames (~2-3 seconds at 20fps logic)
+            PROXIMITY_THRESHOLD = 0.04 # Face must be 4% of screen width (Reasonable distance)
+            PERSISTENCE_THRESHOLD = 15 # 15 Frames (~1 second) - Faster learning
             
+            # Debug Stats
+            print(f"[FaceTracker] Unknown. Ratio: {width_ratio:.3f} (Need 0.040), Seen: {self.active_unknowns[matched_id]['seen_count']} (Need 15)")
+
             if width_ratio > PROXIMITY_THRESHOLD:
                 if self.active_unknowns[matched_id]['seen_count'] > PERSISTENCE_THRESHOLD:
                     # HEURISTIC MET! TRUST THIS PERSON.
@@ -171,6 +177,12 @@ class FaceManager:
                     
                     # cleanup
                     del self.active_unknowns[matched_id]
+                else:
+                    # Good size, just need to wait longer
+                    pass
+            else:
+                 # Too far away
+                 pass
 
     def identify_person(self, frame, box=None):
         """
