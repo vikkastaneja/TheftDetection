@@ -1,0 +1,43 @@
+graph TD
+    subgraph External_Inputs [External Inputs]
+        C1[RTSP Stream 1]
+        C2[RTSP Stream 2]
+    end
+    subgraph Workers [Parallel StreamWorkers Threaded]
+        direction LR
+        subgraph W1 [Worker 1]
+            D1[Ensemble Detector] --> E1[Event Manager]
+            E1 --> ID1[Face Identification]
+        end
+        subgraph W2 [Worker 2]
+            D2[Ensemble Detector] --> E2[Event Manager]
+            E2 --> ID2[Face Identification]
+        end
+    end
+    subgraph Shared_Resources [Shared Resources]
+        FaceDB[(Shared Face Database)]
+        Models[Pre-trained YOLO/RT-DETR]
+    end
+    subgraph Global_Manager [Global Manager Main Thread]
+        Display[Multi-Cam Grid UI]
+        Input[Keyboard Controls q/r]
+    end
+    subgraph Alerting_Pipeline [Alerting Pipeline]
+        Ntfy[Ntfy.sh Push Alerts]
+        GPT[OpenAI Vision Verification]
+    end
+    %% Connections
+    C1 --> D1
+    C2 --> D2
+    
+    ID1 <--> FaceDB
+    ID2 <--> FaceDB
+    
+    W1 --> Display
+    W2 --> Display
+    
+    W1 --> Ntfy
+    W2 --> Ntfy
+    
+    Ntfy --> GPT
+    Input --> FaceDB

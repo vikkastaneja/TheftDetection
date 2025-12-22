@@ -1,0 +1,24 @@
+flowchart TD
+    Start([Capture Frame]) --> Decode[Decode RTSP Stream]
+    Decode --> Detect[Parallel Inference: YOLO + RT-DETR]
+    Detect --> Merge[Deduplicate & Merge Detections]
+    
+    Merge --> PkgCheck{Package Present?}
+    PkgCheck -- Yes --> Track[Update Tracked Package Locations]
+    PkgCheck -- No --> StolenCheck{Was Package Here Before?}
+    
+    StolenCheck -- Yes --> PersonCheck{Person Present?}
+    PersonCheck -- Yes --> Identity[Identify Person via FaceManager]
+    
+    Identity --> Known{Is Owner?}
+    Known -- No --> Alert[Trigger POTENTIAL THEFT Alert]
+    Known -- Yes --> Authorize[Log: Authorized Removal]
+    
+    Alert --> Notify[Send Ntfy.sh Notification]
+    Notify --> Vision[Async: Send Frames to OpenAI Vision]
+    
+    Authorize --> Buffer[Update History Buffer]
+    Track --> Buffer
+    StolenCheck -- No --> Buffer
+    
+    Buffer --> End([Wait for Next Frame])
